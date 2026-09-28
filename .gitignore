@@ -1,0 +1,21 @@
+# TLS certificate & private key (generated locally by gen_cert.py)
+*.pem
+
+# Local SQLite database (users, RSA keys, messages)
+*.db
+
+# Encrypted images sent between users
+uploads/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editor / OS
+.vscode/
+.idea/
+.claude/
+Thumbs.db
+.DS_Store

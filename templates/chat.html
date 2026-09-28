@@ -1,0 +1,895 @@
+{% extends "base.html" %}
+{% block title %}IEA – Chat{% endblock %}
+{% block head %}
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+<!-- DES implemented from scratch — no external library -->
+<style>
+  .chat-layout{display:flex;height:calc(100vh - 52px)}
+  .sidebar{width:220px;background:#16162a;border-right:1px solid #2d2d4e;display:flex;flex-direction:column}
+  .sidebar-header{padding:14px;font-size:13px;font-weight:600;color:#9ca3af;border-bottom:1px solid #2d2d4e;text-transform:uppercase;letter-spacing:.5px}
+  .user-item{padding:10px 14px;cursor:pointer;border-bottom:1px solid #1f1f3a;display:flex;align-items:center;gap:8px;font-size:14px;transition:.15s}
+  .user-item:hover{background:#1f1f3a}
+  .user-item.active{background:#1e3a5f}
+  .user-dot{width:8px;height:8px;border-radius:50%;background:#4b5563;flex-shrink:0}
+  .user-dot.online{background:#22c55e}
+  .chat-main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+  .chat-header{padding:12px 18px;border-bottom:1px solid #2d2d4e;display:flex;align-items:center;gap:10px;background:#16162a}
+  .messages-area{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px}
+  .msg{max-width:70%;padding:10px 14px;border-radius:12px;font-size:14px;line-height:1.5;word-break:break-word}
+  .msg-out{align-self:flex-end;background:#1e3a5f;border-bottom-right-radius:3px}
+  .msg-in{align-self:flex-start;background:#1a1a2e;border:1px solid #2d2d4e;border-bottom-left-radius:3px}
+  .msg-meta{font-size:11px;color:#6b7280;margin-top:4px}
+  .msg-img{max-width:260px;border-radius:8px;margin-top:6px;cursor:pointer}
+  .input-area{padding:14px;border-top:1px solid #2d2d4e;background:#16162a;display:flex;flex-direction:column;gap:8px}
+  .input-row{display:flex;gap:8px}
+  .input-row input{flex:1}
+  .tag-enc{font-size:10px;background:#1a2e1a;color:#86efac;padding:1px 6px;border-radius:4px;margin-left:4px}
+  .tag-sig{font-size:10px;background:#1e3a5f;color:#93c5fd;padding:1px 6px;border-radius:4px;margin-left:4px}
+  .empty-state{flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;color:#4b5563;gap:8px}
+  .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:100;align-items:center;justify-content:center}
+  .modal-overlay.show{display:flex}
+  .modal-overlay img{max-width:90vw;max-height:90vh;border-radius:8px}
+  .unread{margin-left:auto;background:#2563eb;color:#fff;border-radius:10px;padding:1px 7px;font-size:11px}
+  .key-ok{background:#052e16;color:#86efac;padding:2px 8px;border-radius:10px;font-size:11px}
+  .key-warn{background:#3f3f46;color:#a1a1aa;padding:2px 8px;border-radius:10px;font-size:11px}
+  .img-locked{display:flex;align-items:center;gap:8px;background:#1f1f3a;border:1px dashed #374151;border-radius:8px;padding:12px 16px;cursor:pointer;margin-top:4px;transition:.2s;user-select:none}
+  .img-locked:hover{background:#2a2a4a;border-color:#2563eb}
+  .img-locked span{font-size:13px;color:#9ca3af}
+  .rsa-pill{font-size:10px;font-family:monospace;background:#0f0f1a;border:1px solid #2d2d4e;color:#6b7280;padding:2px 8px;border-radius:6px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:help}
+  .rsa-pill.changed{border-color:#f59e0b;color:#fbbf24;animation:flash .4s ease}
+  @keyframes flash{0%,100%{opacity:1}50%{opacity:.3}}
+</style>
+{% endblock %}
+{% block body %}
+<nav>
+  <span class="brand">🔐 IEA</span>
+  <div class="nav-right">
+    <span class="tag">Client</span>
+    <span id="myNameChip" style="font-size:13px;font-weight:500;padding:3px 12px;border-radius:20px">{{ username }}</span>
+    <span id="keyStatus" class="key-warn">Keys loading…</span>
+    <button onclick="location.reload()" class="btn" style="font-size:13px;padding:5px 12px;background:#374151;color:#e0e0e0">↺ Refresh</button>
+    <a href="/logout" class="btn btn-danger" style="font-size:13px;padding:5px 12px">Logout</a>
+  </div>
+</nav>
+
+<div class="chat-layout">
+  <div class="sidebar">
+    <div class="sidebar-header">Users</div>
+    <div id="userList">
+      {% for u in users %}
+      <div class="user-item" data-user="{{ u.username }}" onclick="selectUser('{{ u.username }}')">
+        <div class="user-dot" id="dot-{{ u.username }}"></div>
+        <span>{{ u.username }}</span>
+      </div>
+      {% endfor %}
+      {% if not users %}
+      <div style="padding:14px;font-size:13px;color:#4b5563">No other users yet</div>
+      {% endif %}
+    </div>
+    <div style="margin-top:auto;padding:10px 14px;border-top:1px solid #2d2d4e">
+      <div style="font-size:10px;color:#4b5563;margin-bottom:3px">My RSA key (rotates every 1 min):</div>
+      <div class="rsa-pill" id="myRsaKey" style="max-width:190px" title="My current RSA public key">—</div>
+      <div style="font-size:10px;color:#4b5563;margin-top:4px" id="keyInfo">Initializing…</div>
+    </div>
+  </div>
+
+  <div class="chat-main">
+    <div id="emptyState" class="empty-state">
+      <div style="font-size:40px">💬</div>
+      <div>Select a user to start chatting</div>
+      <div style="font-size:12px">All messages are DES-encrypted · RSA key exchange</div>
+    </div>
+    <div id="chatArea" style="display:none;flex:1;flex-direction:column;overflow:hidden">
+      <div class="chat-header" style="flex-wrap:wrap;gap:6px">
+        <div class="user-dot online"></div>
+        <span id="chatWith" style="font-weight:600"></span>
+        <span class="badge badge-info" style="font-size:10px">DES Encrypted · RSA Exchange · Signed</span>
+        <div style="margin-left:auto;display:flex;flex-direction:column;align-items:flex-end;gap:2px">
+          <div style="font-size:10px;color:#4b5563">Their RSA key (updates every 1 min):</div>
+          <div class="rsa-pill" id="peerRsaKey" title="Peer's current RSA public key">—</div>
+        </div>
+      </div>
+      <div class="messages-area" id="messagesArea"></div>
+      <div class="input-area">
+        <div class="input-row">
+          <input type="text" id="msgInput" placeholder="Type a message…" onkeydown="if(event.key==='Enter')sendText()"/>
+          <button class="btn btn-primary" onclick="sendText()">Send</button>
+          <label class="btn btn-success" style="cursor:pointer">
+            📷
+            <input type="file" accept="image/*" id="imgInput" style="display:none" onchange="sendImage(this)"/>
+          </label>
+        </div>
+        <div style="font-size:11px;color:#4b5563">🔒 Session key exchanged via RSA · Signed with your private key</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="lightbox" onclick="this.classList.remove('show')">
+  <img id="lightboxImg" src=""/>
+</div>
+
+<script>
+const ME = "{{ username }}";
+// Color username chip in navbar
+(function(){
+  const COLORS=[{bg:'#166534',fg:'#86efac'},{bg:'#1e3a5f',fg:'#93c5fd'},{bg:'#4c1d95',fg:'#c4b5fd'},
+    {bg:'#7c2d12',fg:'#fdba74'},{bg:'#164e63',fg:'#67e8f9'},{bg:'#713f12',fg:'#fde68a'}];
+  let h=0; for(let i=0;i<ME.length;i++) h=(h*31+ME.charCodeAt(i))&0xffff;
+  const c=COLORS[h%COLORS.length];
+  const chip=document.getElementById('myNameChip');
+  if(chip){chip.style.background=c.bg;chip.style.color=c.fg;}
+})();
+const KEY_ROTATION_MS = 60000; // 1 minute
+
+let myKeys      = null;   // { privSign: CryptoKey, privEnc: CryptoKey } — current
+let myRawKeys   = null;   // { privSign, pubSign, privEnc, pubEnc, ts } — current raw
+let myKeyHistory = [];    // array of old raw keypairs for decrypting old messages
+let peerCache   = {};     // username -> { pubSign, pubEnc }
+let socket      = null;
+let allMsgs     = [];
+let currentPeer = null;
+let keysReady   = false;
+
+// ── base64 helpers ──
+const b64e = buf => btoa(String.fromCharCode(...new Uint8Array(buf)));
+const b64d = s   => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+
+// ── key import helpers ──
+const importSign   = b64 => crypto.subtle.importKey('pkcs8', b64d(b64), {name:'RSASSA-PKCS1-v1_5',hash:'SHA-256'}, false, ['sign']);
+const importVerify = b64 => crypto.subtle.importKey('spki',  b64d(b64), {name:'RSASSA-PKCS1-v1_5',hash:'SHA-256'}, false, ['verify']);
+const importEnc    = b64 => crypto.subtle.importKey('spki',  b64d(b64), {name:'RSA-OAEP',hash:'SHA-256'}, false, ['encrypt']);
+const importDec    = b64 => crypto.subtle.importKey('pkcs8', b64d(b64), {name:'RSA-OAEP',hash:'SHA-256'}, false, ['decrypt']);
+
+// ── generate & store RSA key pair ──
+async function generateKeyPair() {
+  const signPair = await crypto.subtle.generateKey(
+    {name:'RSASSA-PKCS1-v1_5', modulusLength:2048, publicExponent:new Uint8Array([1,0,1]), hash:'SHA-256'}, true, ['sign','verify']);
+  const encPair  = await crypto.subtle.generateKey(
+    {name:'RSA-OAEP', modulusLength:2048, publicExponent:new Uint8Array([1,0,1]), hash:'SHA-256'}, true, ['encrypt','decrypt']);
+  return {
+    privSign: b64e(await crypto.subtle.exportKey('pkcs8', signPair.privateKey)),
+    pubSign:  b64e(await crypto.subtle.exportKey('spki',  signPair.publicKey)),
+    privEnc:  b64e(await crypto.subtle.exportKey('pkcs8', encPair.privateKey)),
+    pubEnc:   b64e(await crypto.subtle.exportKey('spki',  encPair.publicKey)),
+    ts: Date.now()
+  };
+}
+
+function saveKeyStore(current, history) {
+  // Keep current + last 20 old keypairs so old messages stay decryptable
+  const store = { current, history: history.slice(0, 20) };
+  localStorage.setItem('iea_keys_' + ME, JSON.stringify(store));
+}
+
+async function rotateKeys() {
+  const raw = await generateKeyPair();
+
+  myRawKeys = raw;
+  myKeys    = { privSign: await importSign(raw.privSign), privEnc: await importDec(raw.privEnc) };
+  keysReady = true;
+
+  // Save to localStorage as backup
+  localStorage.setItem('iea_keys_' + ME, JSON.stringify(raw));
+
+  // Push BOTH public and private key to server — stored in rsa_keys table
+  // Private key stored server-side so history always decryptable even after localStorage clear
+  socket.emit('update_pubkey', { pub_key: raw.pubEnc, priv_key: raw.privEnc });
+
+  // Fetch updated key history from server
+  await fetchMyKeyHistory();
+
+  setStatus('Keys active ✓', true);
+  document.getElementById('keyInfo').textContent = 'Rotated: ' + new Date().toLocaleTimeString();
+  updateMyRsaDisplay();
+}
+
+async function fetchMyKeyHistory() {
+  try {
+    const resp = await fetch('/api/my_keys', {credentials:'include'});
+    const keys = await resp.json();
+    // Import all private enc keys for decryption
+    myKeyHistory = [];
+    for (const k of keys) {
+      if (k.private_key) {
+        try {
+          myKeyHistory.push(await importDec(k.private_key));
+        } catch {}
+      }
+    }
+  } catch(e) { console.warn('Could not fetch key history:', e); }
+}
+
+async function loadKeys() {
+  // First: fetch ALL private keys from server (rsa_keys table)
+  // so old messages are always decryptable regardless of localStorage
+  await fetchMyKeyHistory();
+
+  // Check if we have a current key in localStorage
+  const stored = localStorage.getItem('iea_keys_' + ME);
+  if (stored) {
+    try {
+      const cur = JSON.parse(stored);
+      myRawKeys = cur;
+      myKeys    = { privSign: await importSign(cur.privSign), privEnc: await importDec(cur.privEnc) };
+      keysReady = true;
+      // Re-announce current public key to server
+      socket.emit('update_pubkey', { pub_key: cur.pubEnc, priv_key: cur.privEnc });
+      setStatus('Keys active ✓', true);
+      document.getElementById('keyInfo').textContent = 'Loaded: ' + new Date().toLocaleTimeString();
+      updateMyRsaDisplay();
+      return;
+    } catch {}
+  }
+  // No localStorage key — generate fresh
+  await rotateKeys();
+}
+
+function setStatus(txt, ok) {
+  const el = document.getElementById('keyStatus');
+  el.textContent = txt;
+  el.className = ok ? 'key-ok' : 'key-warn';
+}
+
+// ── peer key lookup — returns raw base64 SPKI public key ──
+async function getPeerKeys(username) {
+  if (peerCache[username]) return peerCache[username];
+  const r = await fetch('/api/user_pubkey/' + username, {credentials:'include'});
+  const d = await r.json();
+  if (!d.public_key) return null;
+  peerCache[username] = { pubEnc: d.public_key };
+  return peerCache[username];
+}
+
+// ════════════════════════════════════════════════════════
+//  DES — FROM SCRATCH IMPLEMENTATION (no external library)
+//  Implements: key schedule, IP/FP, Feistel rounds,
+//              S-boxes, DES-CBC mode, PKCS7 padding
+// ════════════════════════════════════════════════════════
+
+const DES = (() => {
+  // ── Permutation tables ──────────────────────────────
+  const IP = [
+    58,50,42,34,26,18,10,2, 60,52,44,36,28,20,12,4,
+    62,54,46,38,30,22,14,6, 64,56,48,40,32,24,16,8,
+    57,49,41,33,25,17, 9,1, 59,51,43,35,27,19,11,3,
+    61,53,45,37,29,21,13,5, 63,55,47,39,31,23,15,7
+  ];
+  const IP_INV = [
+    40,8,48,16,56,24,64,32, 39,7,47,15,55,23,63,31,
+    38,6,46,14,54,22,62,30, 37,5,45,13,53,21,61,29,
+    36,4,44,12,52,20,60,28, 35,3,43,11,51,19,59,27,
+    34,2,42,10,50,18,58,26, 33,1,41, 9,49,17,57,25
+  ];
+  const E = [
+    32,1,2,3,4,5,   4,5,6,7,8,9,
+     8,9,10,11,12,13, 12,13,14,15,16,17,
+    16,17,18,19,20,21, 20,21,22,23,24,25,
+    24,25,26,27,28,29, 28,29,30,31,32,1
+  ];
+  const P = [
+    16,7,20,21,29,12,28,17,
+     1,15,23,26, 5,18,31,10,
+     2,8,24,14,32,27, 3, 9,
+    19,13,30, 6,22,11, 4,25
+  ];
+  const PC1 = [
+    57,49,41,33,25,17,9,  1,58,50,42,34,26,18,
+    10, 2,59,51,43,35,27, 19,11, 3,60,52,44,36,
+    63,55,47,39,31,23,15,  7,62,54,46,38,30,22,
+    14, 6,61,53,45,37,29, 21,13, 5,28,20,12, 4
+  ];
+  const PC2 = [
+    14,17,11,24, 1, 5, 3,28, 15, 6,21,10,
+    23,19,12, 4,26, 8, 16, 7,27,20,13, 2,
+    41,52,31,37,47,55, 30,40,51,45,33,48,
+    44,49,39,56,34,53, 46,42,50,36,29,32
+  ];
+  const SHIFTS = [1,1,2,2,2,2,2,2,1,2,2,2,2,2,2,1];
+
+  // ── S-boxes ─────────────────────────────────────────
+  const SBOX = [
+    [ // S1
+      [14,4,13,1,2,15,11,8,3,10,6,12,5,9,0,7],
+      [0,15,7,4,14,2,13,1,10,6,12,11,9,5,3,8],
+      [4,1,14,8,13,6,2,11,15,12,9,7,3,10,5,0],
+      [15,12,8,2,4,9,1,7,5,11,3,14,10,0,6,13]
+    ],
+    [ // S2
+      [15,1,8,14,6,11,3,4,9,7,2,13,12,0,5,10],
+      [3,13,4,7,15,2,8,14,12,0,1,10,6,9,11,5],
+      [0,14,7,11,10,4,13,1,5,8,12,6,9,3,2,15],
+      [13,8,10,1,3,15,4,2,11,6,7,12,0,5,14,9]
+    ],
+    [ // S3
+      [10,0,9,14,6,3,15,5,1,13,12,7,11,4,2,8],
+      [13,7,0,9,3,4,6,10,2,8,5,14,12,11,15,1],
+      [13,6,4,9,8,15,3,0,11,1,2,12,5,10,14,7],
+      [1,10,13,0,6,9,8,7,4,15,14,3,11,5,2,12]
+    ],
+    [ // S4
+      [7,13,14,3,0,6,9,10,1,2,8,5,11,12,4,15],
+      [13,8,11,5,6,15,0,3,4,7,2,12,1,10,14,9],
+      [10,6,9,0,12,11,7,13,15,1,3,14,5,2,8,4],
+      [3,15,0,6,10,1,13,8,9,4,5,11,12,7,2,14]
+    ],
+    [ // S5
+      [2,12,4,1,7,10,11,6,8,5,3,15,13,0,14,9],
+      [14,11,2,12,4,7,13,1,5,0,15,10,3,9,8,6],
+      [4,2,1,11,10,13,7,8,15,9,12,5,6,3,0,14],
+      [11,8,12,7,1,14,2,13,6,15,0,9,10,4,5,3]
+    ],
+    [ // S6
+      [12,1,10,15,9,2,6,8,0,13,3,4,14,7,5,11],
+      [10,15,4,2,7,12,9,5,6,1,13,14,0,11,3,8],
+      [9,14,15,5,2,8,12,3,7,0,4,10,1,13,11,6],
+      [4,3,2,12,9,5,15,10,11,14,1,7,6,0,8,13]
+    ],
+    [ // S7
+      [4,11,2,14,15,0,8,13,3,12,9,7,5,10,6,1],
+      [13,0,11,7,4,9,1,10,14,3,5,12,2,15,8,6],
+      [1,4,11,13,12,3,7,14,10,15,6,8,0,5,9,2],
+      [6,11,13,8,1,4,10,7,9,5,0,15,14,2,3,12]
+    ],
+    [ // S8
+      [13,2,8,4,6,15,11,1,10,9,3,14,5,0,12,7],
+      [1,15,13,8,10,3,7,4,12,5,6,11,0,14,9,2],
+      [7,11,4,1,9,12,14,2,0,6,10,13,15,3,5,8],
+      [2,1,14,7,4,10,8,13,15,12,9,0,3,5,6,11]
+    ]
+  ];
+
+  // ── Bit manipulation helpers ─────────────────────────
+  // Convert 8-byte Uint8Array → two 32-bit integers [hi, lo]
+  function bytesToHiLo(b, offset=0) {
+    const hi = (b[offset]<<24|b[offset+1]<<16|b[offset+2]<<8|b[offset+3])>>>0;
+    const lo = (b[offset+4]<<24|b[offset+5]<<16|b[offset+6]<<8|b[offset+7])>>>0;
+    return [hi, lo];
+  }
+  function hiLoToBytes(hi, lo) {
+    return new Uint8Array([
+      (hi>>>24)&0xff,(hi>>>16)&0xff,(hi>>>8)&0xff,hi&0xff,
+      (lo>>>24)&0xff,(lo>>>16)&0xff,(lo>>>8)&0xff,lo&0xff
+    ]);
+  }
+
+  // Extract bit n (1-indexed) from a 64-bit value stored as [hi, lo]
+  function getBit64(hi, lo, n) {
+    n--;
+    if (n < 32) return (hi >>> (31 - n)) & 1;
+    return (lo >>> (63 - n)) & 1;
+  }
+
+  // Apply a permutation table to a 64-bit [hi, lo] pair, output as 64-bit [hi, lo]
+  function permute64(hi, lo, table) {
+    let rhi = 0, rlo = 0;
+    const len = table.length;
+    for (let i = 0; i < len; i++) {
+      const bit = getBit64(hi, lo, table[i]);
+      if (i < 32) rhi = (rhi | (bit << (31 - i))) >>> 0;
+      else        rlo = (rlo | (bit << (63 - i))) >>> 0;
+    }
+    return [rhi, rlo];
+  }
+
+  // ── Key schedule: generate 16 subkeys ───────────────
+  function generateSubkeys(keyBytes) {
+    const [khi, klo] = bytesToHiLo(keyBytes);
+
+    // PC1: 64 → 56 bits (split into C 28-bit and D 28-bit)
+    let c = 0, d = 0;
+    for (let i = 0; i < 28; i++) {
+      c = (c | (getBit64(khi, klo, PC1[i])     << (27-i))) >>> 0;
+      d = (d | (getBit64(khi, klo, PC1[i+28])  << (27-i))) >>> 0;
+    }
+
+    const subkeys = [];
+    for (let round = 0; round < 16; round++) {
+      const s = SHIFTS[round];
+      // Left circular shift of 28-bit halves
+      c = (((c << s) | (c >>> (28 - s))) & 0x0FFFFFFF) >>> 0;
+      d = (((d << s) | (d >>> (28 - s))) & 0x0FFFFFFF) >>> 0;
+
+      // Combine C and D into 56 bits, apply PC2 → 48-bit subkey
+      // Store as two 24-bit values for easier S-box access
+      const cd_hi = ((c >>> 4) & 0xFFFFFF) >>> 0;
+      const cd_mid = (((c & 0xF) << 24) | (d >>> 4)) >>> 0;
+
+      // Build 48-bit subkey using PC2 (stored as 6 groups of 8 bits → 6 bytes)
+      let sk = new Uint8Array(6);
+      for (let i = 0; i < 48; i++) {
+        const pc2pos = PC2[i] - 1;
+        let bit;
+        if (pc2pos < 28) bit = (c >>> (27 - pc2pos)) & 1;
+        else             bit = (d >>> (55 - pc2pos)) & 1;
+        sk[i >> 3] |= (bit << (7 - (i & 7)));
+      }
+      subkeys.push(sk);
+    }
+    return subkeys;
+  }
+
+  // ── f function (Feistel) ────────────────────────────
+  function feistel(R, subkey) {
+    // Expand R (32 bits) to 48 bits using E table
+    let expanded = new Uint8Array(6);
+    for (let i = 0; i < 48; i++) {
+      const srcBit = E[i] - 1;
+      const bit = (R >>> (31 - srcBit)) & 1;
+      expanded[i >> 3] |= (bit << (7 - (i & 7)));
+    }
+
+    // XOR with subkey
+    for (let i = 0; i < 6; i++) expanded[i] ^= subkey[i];
+
+    // Apply 8 S-boxes (6 bits each → 4 bits each)
+    let sOut = 0;
+    for (let s = 0; s < 8; s++) {
+      const byteIdx = (s * 6) >> 3;
+      const bitOff  = (s * 6) & 7;
+      // Extract 6 bits
+      let six;
+      if (bitOff <= 2) {
+        six = (expanded[byteIdx] >>> (2 - bitOff)) & 0x3F;
+      } else {
+        six = ((expanded[byteIdx] << (bitOff - 2)) | (expanded[byteIdx+1] >>> (10 - bitOff))) & 0x3F;
+      }
+      const row = ((six & 0x20) >> 4) | (six & 1);
+      const col = (six >> 1) & 0xF;
+      const val = SBOX[s][row][col];
+      sOut = (sOut | (val << (28 - s * 4))) >>> 0;
+    }
+
+    // Apply P permutation to 32-bit sOut
+    let pOut = 0;
+    for (let i = 0; i < 32; i++) {
+      const bit = (sOut >>> (32 - P[i])) & 1;
+      pOut = (pOut | (bit << (31 - i))) >>> 0;
+    }
+    return pOut;
+  }
+
+  // ── DES encrypt/decrypt one 8-byte block ────────────
+  function desBlock(blockBytes, subkeys) {
+    const [bhi, blo] = bytesToHiLo(blockBytes);
+
+    // Initial Permutation
+    let [iphi, iplo] = permute64(bhi, blo, IP);
+
+    let L = iphi >>> 0;
+    let R = iplo  >>> 0;
+
+    // 16 Feistel rounds
+    for (let i = 0; i < 16; i++) {
+      const f = feistel(R, subkeys[i]);
+      const newR = (L ^ f) >>> 0;
+      L = R;
+      R = newR;
+    }
+
+    // Swap L and R, then Final Permutation
+    const [fphi, fplo] = permute64(R, L, IP_INV);
+    return hiLoToBytes(fphi, fplo);
+  }
+
+  // ── PKCS7 padding ───────────────────────────────────
+  function pkcs7Pad(data) {
+    const pad = 8 - (data.length % 8);
+    const out = new Uint8Array(data.length + pad);
+    out.set(data);
+    out.fill(pad, data.length);
+    return out;
+  }
+  function pkcs7Unpad(data) {
+    const pad = data[data.length - 1];
+    if (pad < 1 || pad > 8) throw new Error("Invalid PKCS7 padding");
+    return data.slice(0, data.length - pad);
+  }
+
+  // ── XOR two 8-byte arrays ───────────────────────────
+  function xor8(a, b) {
+    const out = new Uint8Array(8);
+    for (let i = 0; i < 8; i++) out[i] = a[i] ^ b[i];
+    return out;
+  }
+
+  // ── Public API: DES-CBC ─────────────────────────────
+  return {
+    /**
+     * Encrypt data using DES-CBC with PKCS7 padding.
+     * @param {Uint8Array} data  — plaintext
+     * @param {Uint8Array} key   — 8 bytes (64-bit DES key)
+     * @returns {Uint8Array}     — IV (8 bytes) + ciphertext
+     */
+    encrypt(data, key) {
+      const subkeys = generateSubkeys(key);
+      const padded  = pkcs7Pad(data);
+      const iv      = crypto.getRandomValues(new Uint8Array(8));
+      const out     = new Uint8Array(8 + padded.length);
+      out.set(iv);
+      let prev = iv;
+      for (let i = 0; i < padded.length; i += 8) {
+        const block    = padded.slice(i, i + 8);
+        const xored    = xor8(block, prev);
+        const encBlock = desBlock(xored, subkeys);
+        out.set(encBlock, 8 + i);
+        prev = encBlock;
+      }
+      return out;
+    },
+
+    /**
+     * Decrypt DES-CBC ciphertext (IV prepended).
+     * @param {Uint8Array} data — IV (8 bytes) + ciphertext
+     * @param {Uint8Array} key  — 8 bytes
+     * @returns {Uint8Array}    — plaintext
+     */
+    decrypt(data, key) {
+      const subkeys = generateSubkeys(key);
+      // Reverse subkeys for decryption
+      const decKeys = [...subkeys].reverse();
+      const iv  = data.slice(0, 8);
+      const ct  = data.slice(8);
+      const out = new Uint8Array(ct.length);
+      let prev  = iv;
+      for (let i = 0; i < ct.length; i += 8) {
+        const block    = ct.slice(i, i + 8);
+        const decBlock = desBlock(block, decKeys);
+        const plain    = xor8(decBlock, prev);
+        out.set(plain, i);
+        prev = block;
+      }
+      return pkcs7Unpad(out);
+    }
+  };
+})();
+
+// ── DES-CBC session crypto ───────────────────────────
+// Key = 8 bytes (64-bit), IV = 8 bytes (random, prepended to ciphertext)
+function desEncrypt(data, keyBytes) {
+  return DES.encrypt(data instanceof Uint8Array ? data : new Uint8Array(data), keyBytes);
+}
+function desDecrypt(data, keyBytes) {
+  return DES.decrypt(data instanceof Uint8Array ? data : new Uint8Array(data), keyBytes);
+}
+
+// ── RSA wrap/unwrap DES session key ──
+async function wrapKey(keyBytes, pubEncB64) {
+  const pub = await importEnc(pubEncB64);
+  return await crypto.subtle.encrypt({name:'RSA-OAEP'}, pub, keyBytes);
+}
+async function unwrapKey(encBytes) {
+  return await crypto.subtle.decrypt({name:'RSA-OAEP'}, myKeys.privEnc, encBytes);
+}
+
+// ── sign / verify ──
+async function sign(data) {
+  return await crypto.subtle.sign('RSASSA-PKCS1-v1_5', myKeys.privSign, data);
+}
+async function verify(data, sig, pubSignB64) {
+  try {
+    const pub = await importVerify(pubSignB64);
+    return await crypto.subtle.verify('RSASSA-PKCS1-v1_5', pub, sig, data);
+  } catch { return false; }
+}
+
+// ── decrypt incoming message — tries current key then all historical keys ──
+async function decryptMsg(m) {
+  if (!keysReady || !m.encrypted_session_key) return m;
+
+  // For image messages stored in DB: fetch encrypted bytes from server
+  let ctB64 = m.content || m.encrypted_message || m.encrypted_image_b64 || '';
+  if (!ctB64 && m.image_path) {
+    try {
+      const r = await fetch('/api/encrypted_image/' + m.image_path, {credentials:'include'});
+      const d = await r.json();
+      if (d.data) ctB64 = d.data;
+    } catch {}
+  }
+  if (!ctB64) return m;
+  const ct = b64d(ctB64);
+
+  // Build list of private enc keys to try: current first, then all historical (already CryptoKey)
+  const keysToTry = [myKeys.privEnc, ...myKeyHistory];
+
+  for (const privKey of keysToTry) {
+    try {
+      const rawKey  = new Uint8Array(await crypto.subtle.decrypt({name:'RSA-OAEP'}, privKey, b64d(m.encrypted_session_key)));
+      const pt      = desDecrypt(ct, rawKey);
+
+      if (m.message_type === 'image' || m.type === 'image') {
+        m.decryptedImage = 'data:image/png;base64,' + b64e(pt);
+      } else {
+        m.decryptedText = new TextDecoder().decode(pt);
+      }
+      m.type = m.message_type || m.type || 'text';
+
+      const sigB64 = m.image_signature || m.signature;
+      if (sigB64) {
+        const peer = peerCache[m.sender];
+        if (peer?.pubSign) m.sigVerified = await verify(ct, b64d(sigB64), peer.pubSign);
+      }
+      return m; // success — stop trying
+    } catch { /* try next key */ }
+  }
+  return m; // all keys failed — shows as locked
+}
+
+// ── RSA display helpers ──
+function rsaShort(b64) {
+  if (!b64) return '—';
+  // Skip the fixed SPKI header (~60 chars), show unique middle portion
+  const mid = Math.floor(b64.length / 2);
+  return b64.slice(mid - 16, mid + 16) + '…' + b64.slice(-8);
+}
+
+function updateMyRsaDisplay() {
+  const el = document.getElementById('myRsaKey');
+  if (!el || !myRawKeys) return;
+  const short = rsaShort(myRawKeys.pubEnc);
+  const prev  = el.textContent;
+  el.textContent = short;
+  el.title = 'My current RSA pubEnc key:\n' + myRawKeys.pubEnc;
+  if (prev && prev !== '—' && prev !== short) {
+    el.classList.add('changed');
+    setTimeout(() => el.classList.remove('changed'), 1000);
+  }
+}
+
+// ── UI ──
+function selectUser(u) {
+  currentPeer = u;
+  document.querySelectorAll('.user-item').forEach(el => el.classList.remove('active'));
+  const item = document.querySelector('[data-user="'+u+'"]');
+  item?.classList.add('active');
+  item?.querySelector('.unread')?.remove();
+  document.getElementById('chatWith').textContent = u;
+  document.getElementById('emptyState').style.display = 'none';
+  document.getElementById('chatArea').style.display = 'flex';
+  if (allMsgs.length === 0 && keysReady) loadHistory();
+  else renderMessages();
+  getPeerKeys(u).then(keys => updatePeerRsaDisplay(keys));
+}
+
+function updatePeerRsaDisplay(keys, forceFlash = false) {
+  const el = document.getElementById('peerRsaKey');
+  if (!el) return;
+  const prev = el.textContent;
+  if (keys?.pubEnc) {
+    const short = rsaShort(keys.pubEnc);
+    el.textContent = short;
+    el.title = 'Peer RSA pubEnc key:\n' + keys.pubEnc;
+    if (forceFlash || (prev !== '—' && prev !== short)) {
+      el.classList.remove('changed');
+      void el.offsetWidth; // force reflow to restart animation
+      el.classList.add('changed');
+      setTimeout(() => el.classList.remove('changed'), 1000);
+    }
+  } else {
+    el.textContent = '— not yet registered —';
+  }
+}
+
+function renderMessages() {
+  const area = document.getElementById('messagesArea');
+  if (!currentPeer) return;
+  const msgs = allMsgs.filter(m =>
+    (m.sender === ME && m.receiver === currentPeer) ||
+    (m.sender === currentPeer && m.receiver === ME)
+  );
+  if (!msgs.length) {
+    area.innerHTML = '<div style="text-align:center;color:#4b5563;font-size:13px;margin-top:20px">No messages yet — say hello!</div>';
+    return;
+  }
+  area.innerHTML = '';
+  msgs.forEach(m => area.appendChild(buildBubble(m)));
+  area.scrollTop = area.scrollHeight;
+}
+
+function buildBubble(m) {
+  const out = m.sender === ME;
+  const div = document.createElement('div');
+  div.className = 'msg ' + (out ? 'msg-out' : 'msg-in');
+
+  if (m.type === 'image' || m.message_type === 'image') {
+    if (m.decryptedImage && m._revealed) {
+      // Already decrypted and user clicked to reveal
+      const img = document.createElement('img');
+      img.className = 'msg-img'; img.src = m.decryptedImage;
+      img.onclick = () => { document.getElementById('lightboxImg').src = img.src; document.getElementById('lightbox').classList.add('show'); };
+      div.appendChild(img);
+    } else {
+      // Locked — show placeholder, click to reveal
+      const locked = document.createElement('div');
+      locked.className = 'img-locked';
+      locked.innerHTML = '<span style="font-size:22px">🔒</span><div><div style="font-size:13px;color:#e0e0e0;font-weight:500">Encrypted Image</div><span>Click to decrypt and view</span></div>';
+      locked.onclick = async () => {
+        if (!m.decryptedImage) await decryptMsg(m);
+        if (m.decryptedImage) {
+          m._revealed = true;
+          renderMessages();
+        } else {
+          locked.querySelector('span:last-child').textContent = 'Decryption failed — key mismatch';
+        }
+      };
+      div.appendChild(locked);
+    }
+  } else if (m.decryptedText) {
+    div.textContent = m.decryptedText;
+  } else {
+    const s = document.createElement('span');
+    s.style.color = '#6b7280';
+    s.textContent = '🔒 [Encrypted message]';
+    div.appendChild(s);
+  }
+
+  const meta = document.createElement('div');
+  meta.className = 'msg-meta';
+  meta.innerHTML = (out ? 'You' : m.sender) + ' · ' + toLocalTime(m.created_at)
+    + '<span class="tag-enc">DES Encrypted</span>'
+    + (m.sigVerified ? '<span class="tag-sig">✓ Signed</span>' : '');
+  div.appendChild(meta);
+  return div;
+}
+
+function toLocalTime(ts) {
+  if (!ts) return 'now';
+  // DB gives "2026-06-04 00:04:45" in UTC — append Z so JS parses as UTC
+  const d = new Date(ts.replace(' ', 'T') + 'Z');
+  if (isNaN(d)) return ts; // already a locale string (real-time msg)
+  return d.toLocaleString([], {month:'short', day:'numeric',
+    hour:'2-digit', minute:'2-digit', second:'2-digit'});
+}
+
+function addUnread(sender) {
+  const item = document.querySelector('[data-user="'+sender+'"]');
+  if (!item) return;
+  let b = item.querySelector('.unread');
+  if (!b) { b = document.createElement('span'); b.className = 'unread'; item.appendChild(b); }
+  b.textContent = (parseInt(b.textContent) || 0) + 1;
+}
+
+// ── send text ──
+async function sendText() {
+  const input = document.getElementById('msgInput');
+  const text  = input.value.trim();
+  if (!text || !currentPeer) return;
+  if (!keysReady) { alert('Keys not ready yet, wait a second.'); return; }
+
+  const peer = await getPeerKeys(currentPeer);
+  if (!peer?.pubEnc) { alert('Cannot get ' + currentPeer + '\'s public key. Make sure they have logged in at least once.'); return; }
+
+  const sessRaw    = crypto.getRandomValues(new Uint8Array(8)); // DES key = 8 bytes
+  const enc        = desEncrypt(new TextEncoder().encode(text), sessRaw);
+  const sig        = await sign(enc);
+  const encKey     = await wrapKey(sessRaw, peer.pubEnc);        // for receiver to decrypt
+  const encKeySelf = await wrapKey(sessRaw, myRawKeys.pubEnc);   // for sender to decrypt own history
+
+  socket.emit('send_text', {
+    receiver: currentPeer,
+    encrypted_message: b64e(enc),
+    encrypted_session_key: b64e(encKey),
+    encrypted_session_key_sender: b64e(encKeySelf),
+    signature: b64e(sig)
+  });
+
+  allMsgs.push({ sender:ME, receiver:currentPeer, type:'text', decryptedText:text,
+    created_at: new Date().toLocaleTimeString(), sigVerified:true });
+  renderMessages();
+  input.value = '';
+}
+
+// ── send image ──
+async function sendImage(inp) {
+  if (!inp.files[0] || !currentPeer || !keysReady) return;
+  const peer = await getPeerKeys(currentPeer);
+  if (!peer?.pubEnc) { alert('Cannot get ' + currentPeer + '\'s public key.'); return; }
+
+  const imgBytes   = new Uint8Array(await inp.files[0].arrayBuffer());
+  const sessRaw    = crypto.getRandomValues(new Uint8Array(8)); // DES key = 8 bytes
+  const enc        = desEncrypt(imgBytes, sessRaw);
+  const sig        = await sign(enc);
+  const encKey     = await wrapKey(sessRaw, peer.pubEnc);
+  const encKeySelf = await wrapKey(sessRaw, myRawKeys.pubEnc);
+
+  socket.emit('send_image', {
+    receiver: currentPeer,
+    encrypted_image_b64: b64e(enc),
+    encrypted_session_key: b64e(encKey),
+    encrypted_session_key_sender: b64e(encKeySelf),
+    signature: b64e(sig),
+    filename: inp.files[0].name
+  });
+
+  const reader = new FileReader();
+  reader.onload = e => {
+    allMsgs.push({ sender:ME, receiver:currentPeer, type:'image', decryptedImage:e.target.result,
+      created_at: new Date().toLocaleTimeString(), sigVerified:true });
+    renderMessages();
+  };
+  reader.readAsDataURL(inp.files[0]);
+  inp.value = '';
+}
+
+// ── socket setup ──
+document.addEventListener('DOMContentLoaded', () => {
+  socket = io();
+
+  socket.on('connect', async () => {
+    await loadKeys();
+    await loadHistory();
+  });
+
+  async function loadHistory() {
+    try {
+      const resp = await fetch('/api/messages', {credentials: 'include'});
+      if (!resp.ok) { console.warn('History fetch status:', resp.status); return; }
+      const data = await resp.json();
+      allMsgs = [];
+      for (const m of data) {
+        // normalise fields from DB
+        m.type     = m.message_type || m.type || 'text';
+        m.sender   = m.sender   || '';
+        m.receiver = m.receiver || '';
+        if (m.sender !== ME) await getPeerKeys(m.sender);
+        allMsgs.push(await decryptMsg(m));
+      }
+      renderMessages(); // always call — renderMessages guards on currentPeer internally
+    } catch(e) { console.error('History fetch failed:', e); }
+  }
+
+  socket.on('receive_message', async data => {
+    const keys = await getPeerKeys(data.sender);
+    // Refresh RSA display if this sender is currently open
+    if (currentPeer === data.sender) updatePeerRsaDisplay(keys);
+    const m = await decryptMsg({...data, created_at: new Date().toLocaleTimeString()});
+    allMsgs.push(m);
+    if (currentPeer === data.sender) {
+      renderMessages();
+    } else {
+      addUnread(data.sender);
+    }
+  });
+
+  socket.on('connected_users', d => {
+    d.users.forEach(u => document.getElementById('dot-'+u)?.classList.add('online'));
+  });
+  socket.on('user_status', d => {
+    document.getElementById('dot-'+d.username)?.classList.toggle('online', d.status==='online');
+  });
+  socket.on('users_updated', d => {
+    const list = document.getElementById('userList');
+    const placeholder = list.querySelector('div[style]');
+    d.users.forEach(u => {
+      if (u.username === ME) return;
+      if (document.querySelector('[data-user="'+u.username+'"]')) {
+        // Already exists — just update online dot in case it changed
+        const dot = document.getElementById('dot-'+u.username);
+        if (dot && d.online) dot.classList.toggle('online', d.online.includes(u.username));
+        return;
+      }
+      if (placeholder) placeholder.remove();
+      const item = document.createElement('div');
+      item.className = 'user-item';
+      item.dataset.user = u.username;
+      item.onclick = () => selectUser(u.username);
+      const isOnline = d.online && d.online.includes(u.username);
+      item.innerHTML = '<div class="user-dot '+(isOnline?'online':'')+'" id="dot-'+u.username+'"></div><span>'+u.username+'</span>';
+      list.appendChild(item);
+    });
+  });
+
+  // Peer rotated their RSA keys — delete cache so next fetch gets fresh key
+  socket.on('peer_key_updated', async d => {
+    delete peerCache[d.username];
+    if (currentPeer === d.username) {
+      const keys = await getPeerKeys(d.username);
+      updatePeerRsaDisplay(keys, true); // true = force flash
+    }
+  });
+
+  // Key rotation every 1 minute
+  setInterval(rotateKeys, KEY_ROTATION_MS);
+});
+</script>
+{% endblock %}

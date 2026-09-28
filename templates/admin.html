@@ -1,0 +1,373 @@
+{% extends "base.html" %}
+{% block title %}IEA – Sysadmin{% endblock %}
+{% block head %}
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+<style>
+  .admin-layout{display:flex;height:calc(100vh - 52px)}
+  .admin-sidebar{width:200px;background:#16162a;border-right:1px solid #2d2d4e;padding:16px 0}
+  .nav-item{padding:10px 18px;cursor:pointer;font-size:14px;display:flex;align-items:center;gap:8px;transition:.15s;border-left:3px solid transparent}
+  .nav-item:hover{background:#1f1f3a;border-left-color:#374151}
+  .nav-item.active{background:#1e3a5f;border-left-color:#2563eb;color:#93c5fd}
+  .admin-main{flex:1;overflow-y:auto;padding:24px}
+  .panel{display:none}.panel.active{display:block}
+  .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin-bottom:24px}
+  .stat-card{background:#1a1a2e;border:1px solid #2d2d4e;border-radius:8px;padding:16px}
+  .stat-num{font-size:28px;font-weight:700;color:#7eb8f7}
+  .stat-label{font-size:12px;color:#6b7280;margin-top:4px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;padding:8px 12px;border-bottom:1px solid #2d2d4e;color:#9ca3af;font-weight:600;font-size:12px;text-transform:uppercase}
+  td{padding:8px 12px;border-bottom:1px solid #1f1f3a;vertical-align:middle}
+  tr:hover td{background:#1f1f3a}
+  .section-title{font-size:16px;font-weight:600;margin-bottom:14px;color:#e0e0e0}
+  .live-dot{width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block;animation:pulse 1.5s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+  .log-action{font-size:11px;padding:2px 7px;border-radius:4px;background:#1e3a5f;color:#93c5fd}
+  #onlineList{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px}
+  .online-chip{padding:4px 12px;border-radius:20px;font-size:13px;font-weight:500}
+  pre{background:#0f0f1a;border:1px solid #2d2d4e;border-radius:6px;padding:10px;font-size:11px;overflow-x:auto;white-space:pre-wrap;word-break:break-all;max-height:120px;overflow-y:auto}
+</style>
+{% endblock %}
+{% block body %}
+<nav>
+  <span class="brand">🔐 IEA — Sysadmin</span>
+  <div class="nav-right">
+    <span class="tag">Admin</span>
+    <span class="live-dot"></span>
+    <span style="font-size:13px;color:#9ca3af" id="liveCount">{{ online|length }} online</span>
+    <a href="/logout" class="btn btn-danger" style="font-size:13px;padding:5px 12px">Logout</a>
+  </div>
+</nav>
+
+<div class="admin-layout">
+  <div class="admin-sidebar">
+    <div class="nav-item active" onclick="showPanel('dashboard',this)">📊 Dashboard</div>
+    <div class="nav-item" onclick="showPanel('users',this)">👥 Users</div>
+    <div class="nav-item" onclick="showPanel('messages',this)">💬 Messages</div>
+    <div class="nav-item" onclick="showPanel('logs',this)">📋 Activity Logs</div>
+    <div class="nav-item" onclick="showPanel('keys',this)">🔑 RSA Keys</div>
+  </div>
+
+  <div class="admin-main">
+
+    <!-- Dashboard -->
+    <div class="panel active" id="panel-dashboard">
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-num" id="statOnline">{{ online|length }}</div>
+          <div class="stat-label">Online Now</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-num">{{ users|length }}</div>
+          <div class="stat-label">Total Clients</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-num" id="statMessages">{{ message_count }}</div>
+          <div class="stat-label">Messages</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-num" id="statLogs">{{ log_count }}</div>
+          <div class="stat-label">Log Entries</div>
+        </div>
+      </div>
+
+      <div class="section-title">Online Users</div>
+      <div id="onlineList">
+        {% if not online %}<span id="noUsersText" style="color:#4b5563;font-size:13px">No users online</span>{% endif %}
+        {% for u in online %}
+        <div class="online-chip" id="chip-{{ u }}" data-init="1">{{ u }}</div>
+        {% endfor %}
+      </div>
+
+      <div class="section-title">Recent Activity</div>
+      <table>
+        <thead><tr><th>Time</th><th>User</th><th>Action</th><th>Details</th></tr></thead>
+        <tbody id="liveLog">
+          {% for l in logs[:15] %}
+          <tr>
+            <td style="color:#6b7280;white-space:nowrap">{{ l.created_at }}</td>
+            <td style="color:#93c5fd">{{ l.username }}</td>
+            <td><span class="log-action">{{ l.action }}</span></td>
+            <td style="color:#9ca3af">{{ l.details or '—' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Users -->
+    <div class="panel" id="panel-users">
+      <div class="section-title">Registered Clients</div>
+      <table>
+        <thead><tr><th>#</th><th>Username</th><th>Role</th><th>Registered</th><th>Status</th></tr></thead>
+        <tbody>
+          {% for u in users %}
+          <tr id="user-row-{{ u.username }}">
+            <td style="color:#6b7280">{{ u.id }}</td>
+            <td style="color:#e0e0e0">{{ u.username }}</td>
+            <td><span class="badge badge-info">{{ u.role }}</span></td>
+            <td style="color:#6b7280">{{ u.created_at }}</td>
+            <td><span class="badge badge-offline" id="status-{{ u.username }}">offline</span></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Messages -->
+    <div class="panel" id="panel-messages">
+      <div class="section-title">Message Log (Stored Encrypted)</div>
+      <table>
+        <thead><tr><th>Time</th><th>From</th><th>To</th><th>Type</th><th>Enc. Content</th><th>Signed</th></tr></thead>
+        <tbody>
+          {% for m in messages %}
+          <tr>
+            <td style="color:#6b7280;white-space:nowrap">{{ m.created_at }}</td>
+            <td style="color:#93c5fd">{{ m.sender }}</td>
+            <td style="color:#86efac">{{ m.receiver }}</td>
+            <td>
+              {% if m.message_type == 'image' %}
+              <span class="badge badge-info">🖼 Image</span>
+              {% else %}
+              <span class="badge badge-text">💬 Text</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if m.content %}
+              <pre>{{ m.content[:80] }}{% if m.content|length > 80 %}…{% endif %}</pre>
+              {% elif m.image_path %}
+              <span style="color:#6b7280;font-size:12px">{{ m.image_path }}</span>
+              {% else %}—{% endif %}
+            </td>
+            <td>
+              {% if m.signature %}
+              <span class="badge" style="background:#1a2e1a;color:#86efac">✓ Yes</span>
+              {% else %}
+              <span class="badge badge-offline">No</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Logs -->
+    <div class="panel" id="panel-logs">
+      <div class="section-title">Full Activity Log</div>
+      <table>
+        <thead><tr><th>Time</th><th>User</th><th>Action</th><th>Details</th></tr></thead>
+        <tbody>
+          {% for l in logs %}
+          <tr>
+            <td style="color:#6b7280;white-space:nowrap">{{ l.created_at }}</td>
+            <td style="color:#93c5fd">{{ l.username or '—' }}</td>
+            <td><span class="log-action">{{ l.action }}</span></td>
+            <td style="color:#9ca3af">
+              {{ l.details or '—' }}
+              {% if l.ip_address %}<span style="color:#4b5563;font-size:11px;margin-left:6px">({{ l.ip_address }})</span>{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <!-- RSA Keys -->
+    <div class="panel" id="panel-keys">
+      <div class="section-title">Server RSA Public Key (auto-rotates every 1 min)</div>
+      <div class="card" style="margin-bottom:16px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <span style="font-size:13px;color:#9ca3af">Current Server Public Key</span>
+          <span class="live-dot"></span>
+        </div>
+        <pre id="serverPubKey" style="width:100%;white-space:pre-wrap;word-break:break-all;font-size:12px;max-height:none;overflow:visible">{{ server_pubkey }}</pre>
+      </div>
+
+      <div class="section-title">Client RSA Keys (active keys per user)</div>
+      <table>
+        <thead><tr><th>#</th><th>Username</th><th>Status</th><th>Created At</th><th>Public Key (truncated)</th></tr></thead>
+        <tbody id="rsaKeysTbody">
+          {% for k in rsa_keys %}
+          {% if k.is_active %}
+          <tr data-user="{{ k.username }}" data-active="1">
+            <td style="color:#6b7280">{{ k.id }}</td>
+            <td style="color:#93c5fd">{{ k.username }}</td>
+            <td><span class="badge badge-online">active</span></td>
+            <td style="color:#6b7280">{{ k.created_at }}</td>
+            <td style="font-family:monospace;font-size:11px;color:#6b7280">{{ k.pub_preview }}…</td>
+          </tr>
+          {% endif %}
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+  </div>
+</div>
+
+<script>
+const CHIP_COLORS = [
+  {bg:'#166534',fg:'#86efac'}, {bg:'#1e3a5f',fg:'#93c5fd'},
+  {bg:'#4c1d95',fg:'#c4b5fd'}, {bg:'#7c2d12',fg:'#fdba74'},
+  {bg:'#164e63',fg:'#67e8f9'}, {bg:'#713f12',fg:'#fde68a'},
+  {bg:'#1a2e1a',fg:'#86efac'}, {bg:'#3b0764',fg:'#e9d5ff'}
+];
+let chipColorIndex = 0;
+const chipColorMap = {};
+
+function chipColor(username) {
+  if (!chipColorMap[username]) {
+    chipColorMap[username] = CHIP_COLORS[chipColorIndex % CHIP_COLORS.length];
+    chipColorIndex++;
+  }
+  return chipColorMap[username];
+}
+
+function makeChip(username) {
+  const c = chipColor(username);
+  const d = document.createElement('div');
+  d.className = 'online-chip';
+  d.id = 'chip-' + username;
+  d.textContent = username;
+  d.style.background = c.bg;
+  d.style.color = c.fg;
+  return d;
+}
+
+
+function showPanel(name, el) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('panel-'+name).classList.add('active');
+  el.classList.add('active');
+}
+
+const socket = io();
+socket.emit('join_admin');
+
+socket.on('server_pubkey', d => {
+  document.getElementById('serverPubKey').textContent = d.public_key;
+});
+
+socket.on('user_status', d => {
+  const list = document.getElementById('onlineList');
+  const noText = document.getElementById('noUsersText');
+  if (d.status === 'online') {
+    if (!document.getElementById('chip-'+d.username)) list.appendChild(makeChip(d.username));
+    if (noText) noText.remove();
+    const s = document.getElementById('status-'+d.username);
+    if (s) { s.textContent='online'; s.className='badge badge-online'; }
+  } else {
+    document.getElementById('chip-'+d.username)?.remove();
+    const s = document.getElementById('status-'+d.username);
+    if (s) { s.textContent='offline'; s.className='badge badge-offline'; }
+    if (!list.querySelector('.online-chip')) {
+      const span = document.createElement('span');
+      span.id = 'noUsersText';
+      span.style.cssText = 'color:#4b5563;font-size:13px';
+      span.textContent = 'No users online';
+      list.appendChild(span);
+    }
+  }
+  const count = list.querySelectorAll('.online-chip').length;
+  document.getElementById('statOnline').textContent = count;
+  document.getElementById('liveCount').textContent = count + ' online';
+});
+
+socket.on('users_updated', d => {
+  const tbody = document.querySelector('#panel-users table tbody');
+  if (!tbody) return;
+  d.users.forEach(u => {
+    if (document.getElementById('user-row-'+u.username)) return; // already exists
+    const isOnline = d.online && d.online.includes(u.username);
+    const tr = document.createElement('tr');
+    tr.id = 'user-row-' + u.username;
+    tr.innerHTML = `
+      <td style="color:#6b7280">—</td>
+      <td style="color:#e0e0e0">${u.username}</td>
+      <td><span class="badge badge-info">client</span></td>
+      <td style="color:#6b7280">just now</td>
+      <td><span class="badge ${isOnline?'badge-online':'badge-offline'}" id="status-${u.username}">${isOnline?'online':'offline'}</span></td>`;
+    tbody.appendChild(tr);
+  });
+  const stat = document.querySelector('#panel-dashboard .stat-card:nth-child(2) .stat-num');
+  if (stat) stat.textContent = d.users.length;
+});
+
+// ── Live: Activity Log (dashboard + logs panel) ──
+function prependActivityRow(tbody, d) {
+  if (!tbody) return;
+  const ip = d.ip ? `<span style="color:#4b5563;font-size:11px;margin-left:6px">(${d.ip})</span>` : '';
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td style="color:#6b7280;white-space:nowrap">${d.created_at||new Date().toLocaleString()}</td>
+    <td style="color:#93c5fd">${d.username||'—'}</td>
+    <td><span class="log-action">${d.action}</span></td>
+    <td style="color:#9ca3af">${d.details||'—'}${ip}</td>`;
+  tbody.insertBefore(tr, tbody.firstChild);
+  if (tbody.children.length > 50) tbody.lastChild.remove();
+}
+
+socket.on('admin_activity_update', d => {
+  prependActivityRow(document.getElementById('liveLog'), d);
+  prependActivityRow(document.querySelector('#panel-logs table tbody'), d);
+  const logStat = document.getElementById('statLogs');
+  if (logStat) logStat.textContent = parseInt(logStat.textContent||0) + 1;
+});
+
+// legacy event — no-op now (admin_activity_update handles everything)
+socket.on('activity_update', () => {});
+
+// ── Live: Messages panel ──
+socket.on('admin_message_update', d => {
+  const tbody = document.querySelector('#panel-messages table tbody');
+  if (!tbody) return;
+  const contentCell = d.type === 'image'
+    ? `<span style="color:#6b7280;font-size:12px">${d.content||'—'}</span>`
+    : `<pre>${d.content||'—'}</pre>`;
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td style="color:#6b7280;white-space:nowrap">${d.created_at}</td>
+    <td style="color:#93c5fd">${d.sender}</td>
+    <td style="color:#86efac">${d.receiver}</td>
+    <td><span class="badge ${d.type==='image'?'badge-info':'badge-text'}">
+      ${d.type==='image'?'🖼 Image':'💬 Text'}</span></td>
+    <td>${contentCell}</td>
+    <td>${d.signed?'<span class="badge" style="background:#1a2e1a;color:#86efac">✓ Yes</span>':'<span class="badge badge-offline">No</span>'}</td>`;
+  tbody.insertBefore(tr, tbody.firstChild);
+  const stat = document.getElementById('statMessages');
+  if (stat) stat.textContent = parseInt(stat.textContent||0) + 1;
+});
+
+// ── Live: RSA Keys panel — replace old active row with new one ──
+socket.on('admin_rsa_update', d => {
+  const tbody = document.getElementById('rsaKeysTbody');
+  if (!tbody) return;
+  // Remove the previous active row for this user (keep only current)
+  tbody.querySelectorAll('tr').forEach(row => {
+    if (row.dataset.user === d.username) row.remove();
+  });
+  const tr = document.createElement('tr');
+  tr.dataset.user = d.username; tr.dataset.active = '1';
+  tr.innerHTML = `
+    <td style="color:#6b7280">${d.id}</td>
+    <td style="color:#93c5fd">${d.username}</td>
+    <td><span class="badge badge-online">active</span></td>
+    <td style="color:#6b7280">${d.created_at}</td>
+    <td style="font-family:monospace;font-size:11px;color:#6b7280">${d.pub_preview}…</td>`;
+  tbody.insertBefore(tr, tbody.firstChild);
+});
+
+// Mark online users on load
+// Color initial chips and mark online statuses
+document.querySelectorAll('.online-chip[data-init]').forEach(chip => {
+  const c = chipColor(chip.textContent.trim());
+  chip.style.background = c.bg;
+  chip.style.color = c.fg;
+});
+{% for u in online %}
+const s{{ loop.index }} = document.getElementById('status-{{ u }}');
+if (s{{ loop.index }}) { s{{ loop.index }}.textContent='online'; s{{ loop.index }}.className='badge badge-online'; }
+{% endfor %}
+</script>
+{% endblock %}
